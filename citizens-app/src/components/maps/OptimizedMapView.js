@@ -1,9 +1,9 @@
 import React, { useState, useCallback, useMemo, useRef } from 'react';
-import { View, StyleSheet, Dimensions } from 'react-native';
+import { View, StyleSheet, Dimensions, Platform } from 'react-native';
 import MapView, { Marker, Polygon } from 'react-native-maps';
 import { theme } from '../../config/theme';
 import { useGeoJSON } from '../../hooks/useGeoJSON';
-import { debounce, renderGeoJSONPolygons } from '../../utils/geoUtils';
+import { debounce, throttle, renderGeoJSONPolygons, shouldRenderFeature } from '../../utils/geoUtils';
 import LoadingSpinner from '../common/LoadingSpinner';
 import ErrorMessage from '../common/ErrorMessage';
 
@@ -27,18 +27,26 @@ const OptimizedMapView = ({
 }) => {
   const [mapBounds, setMapBounds] = useState(null);
   const [currentRegion, setCurrentRegion] = useState(initialRegion);
+  const [zoomLevel, setZoomLevel] = useState(10);
   const mapRef = useRef(null);
 
   // Load GeoJSON with bounds filtering for performance
   const { geoJsonData, loading, error, refreshGeoJSON } = useGeoJSON(
     mapBounds,
-    0.002 // Simplification tolerance - adjust based on performance needs
+    Platform.OS === 'ios' ? 0.003 : 0.008 // Higher simplification for Android
   );
 
-  // Debounced region change handler to avoid excessive API calls
-  const debouncedRegionChange = useMemo(
-    () => debounce((region) => {
+  // Calculate zoom level from region
+  const calculateZoomLevel = useCallback((region) => {
+    const zoom = Math.round(Math.log(360 / region.longitudeDelta) / Math.LN2);
+    return Math.max(1, Math.min(20, zoom));
+  }, []);
+
+  // Throttled region change handler for better performance
+  const throttledRegionChange = useMemo(
+    () => throttle((region) => {
       setCurrentRegion(region);
+      setZoomLevel(calculateZoomLevel(region));
       
       // Calculate bounds for GeoJSON filtering
       const bounds = {
@@ -53,28 +61,36 @@ const OptimizedMapView = ({
       };
       
       setMapBounds(bounds);
-    }, 300),
-    []
+    }, Platform.OS === 'ios' ? 100 : 200), // Faster throttling on iOS
+    [calculateZoomLevel]
   );
 
   const handleRegionChangeComplete = useCallback((region) => {
-    debouncedRegionChange(region);
-  }, [debouncedRegionChange]);
+    throttledRegionChange(region);
+  }, [throttledRegionChange]);
 
-  // Memoized ward polygons using native Polygon components
+  // Highly optimized ward polygons with zoom-based filtering
   const wardPolygons = useMemo(() => {
     if (!showWards || !geoJsonData || loading) return null;
 
+    // Limit number of polygons based on device performance
+    const maxPolygons = Platform.OS === 'ios' ? 50 : 25;
+    
     const polygons = renderGeoJSONPolygons(geoJsonData, {
       strokeColor: theme.colors.primary,
-      fillColor: 'rgba(33, 150, 243, 0.1)',
+      fillColor: Platform.OS === 'ios' ? 'rgba(33, 150, 243, 0.1)' : 'rgba(33, 150, 243, 0.05)', // Less opacity on Android
       strokeWidth: 1,
       onPress: onWardPress || ((feature) => {
         console.log('Ward selected:', feature.properties);
       }),
     });
 
-    return polygons.map((polygon) => (
+    // Filter polygons based on zoom level and device capabilities
+    const filteredPolygons = polygons
+      .filter(polygon => shouldRenderFeature(polygon.feature, zoomLevel))
+      .slice(0, maxPolygons);
+
+    return filteredPolygons.map((polygon) => (
       <Polygon
         key={polygon.id}
         coordinates={polygon.coordinates}
@@ -85,11 +101,15 @@ const OptimizedMapView = ({
         tappable={!!polygon.onPress}
       />
     ));
-  }, [geoJsonData, showWards, loading]);
+  }, [geoJsonData, showWards, loading, zoomLevel, onWardPress]);
 
   // Memoized markers for performance
   const renderedMarkers = useMemo(() => {
-    return markers.map((marker, index) => (
+    // Limit markers on low-end devices
+    const maxMarkers = Platform.OS === 'ios' ? markers.length : Math.min(markers.length, 20);
+    const limitedMarkers = markers.slice(0, maxMarkers);
+    
+    return limitedMarkers.map((marker, index) => (
       <Marker
         key={marker.id || index}
         coordinate={{
@@ -125,12 +145,19 @@ const OptimizedMapView = ({
         onRegionChangeComplete={handleRegionChangeComplete}
         onPress={onMapPress}
         showsUserLocation={true}
-        showsMyLocationButton={true}
+        showsMyLocationButton={Platform.OS === 'ios'} // Disable on Android for performance
         loadingEnabled={true}
         loadingIndicatorColor={theme.colors.primary}
         mapType="standard"
-        pitchEnabled={false} // Disable 3D for better performance
-        rotateEnabled={false} // Disable rotation for better performance
+        pitchEnabled={false}
+        rotateEnabled={false}
+        scrollEnabled={true}
+        zoomEnabled={true}
+        // Performance optimizations
+        maxZoomLevel={18}
+        minZoomLevel={6}
+        moveOnMarkerPress={false}
+        toolbarEnabled={false}
         {...mapProps}
       >
         {wardPolygons}
@@ -140,7 +167,7 @@ const OptimizedMapView = ({
 
       {loading && (
         <View style={styles.loadingOverlay}>
-          <LoadingSpinner message="Loading map data..." />
+          <LoadingSpinner message="Loading map..." size="small" />
         </View>
       )}
     </View>
@@ -156,13 +183,14 @@ const styles = StyleSheet.create({
   },
   loadingOverlay: {
     position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(255, 255, 255, 0.8)',
+    top: 10,
+    right: 10,
+    backgroundColor: 'rgba(255, 255, 255, 0.9)',
+    borderRadius: 8,
+    padding: 8,
     justifyContent: 'center',
     alignItems: 'center',
+    minWidth: 100,
   },
 });
 

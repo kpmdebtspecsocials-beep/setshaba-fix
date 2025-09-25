@@ -1,9 +1,36 @@
 import { useState, useEffect } from 'react';
-import { useGeoJSON } from './useGeoJSON';
+import wardService from '../services/wardService';
 import { findWardForPoint } from '../utils/geoUtils';
 
 export const useWards = () => {
-  const { geoJsonData, loading, error } = useGeoJSON();
+  const [wards, setWards] = useState([]);
+  const [geoJsonData, setGeoJsonData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    loadWards();
+  }, []);
+
+  const loadWards = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      
+      // Try to get simplified boundaries from API
+      const boundaries = await wardService.getSimplifiedBoundaries();
+      setGeoJsonData(boundaries);
+      
+      // Also get ward list for metadata
+      const wardsList = await wardService.getWards(null, true);
+      setWards(wardsList);
+    } catch (err) {
+      console.error('Failed to load wards:', err);
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const findWardByLocation = (latitude, longitude) => {
     if (!geoJsonData || loading) return null;
@@ -24,6 +51,8 @@ export const useWards = () => {
   };
 
   const getAllWards = () => {
+    if (wards.length > 0) return wards;
+    
     if (!geoJsonData || loading) return [];
     
     return geoJsonData.features.map(feature => ({
@@ -37,9 +66,11 @@ export const useWards = () => {
 
   return {
     geoJsonData,
+    wards,
     loading,
     error,
     findWardByLocation,
     getAllWards,
+    refreshWards: loadWards,
   };
 };

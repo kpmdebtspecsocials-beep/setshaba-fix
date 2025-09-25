@@ -41,7 +41,7 @@ const LocationPicker = ({
   const [selectedWard, setSelectedWard] = useState(null);
 
   const { getCurrentLocation, reverseGeocode } = useLocation();
-  const { findWardByLocation } = useWards();
+  const { findWardByLocation, loading: wardsLoading } = useWards();
 
   // Initialize with provided location
   useEffect(() => {
@@ -116,9 +116,11 @@ const LocationPicker = ({
     
     setSelectedLocation(newLocation);
     
-    // Find ward for the selected location
-    const ward = findWardByLocation(latitude, longitude);
-    setSelectedWard(ward);
+    // Find ward for the selected location (only if wards are loaded)
+    if (!wardsLoading) {
+      const ward = findWardByLocation(latitude, longitude);
+      setSelectedWard(ward);
+    }
     
     debouncedReverseGeocode(newLocation);
 
@@ -131,6 +133,7 @@ const LocationPicker = ({
       });
     }
   }, [address, onLocationChange, debouncedReverseGeocode, findWardByLocation]);
+  }, [address, onLocationChange, debouncedReverseGeocode, findWardByLocation, wardsLoading]);
 
   const handleAddressChange = (text) => {
     setAddress(text);
@@ -154,7 +157,7 @@ const LocationPicker = ({
 
   // Update ward when location changes
   useEffect(() => {
-    if (selectedLocation) {
+    if (selectedLocation && !wardsLoading) {
       const ward = findWardByLocation(selectedLocation.latitude, selectedLocation.longitude);
       setSelectedWard(ward);
       
@@ -166,7 +169,7 @@ const LocationPicker = ({
         });
       }
     }
-  }, [selectedLocation, findWardByLocation, address, onLocationChange]);
+  }, [selectedLocation, findWardByLocation, address, onLocationChange, wardsLoading]);
   const toggleMapView = () => {
     setShowMapView(!showMapView);
   };

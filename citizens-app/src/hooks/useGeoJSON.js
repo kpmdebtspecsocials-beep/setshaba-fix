@@ -1,15 +1,17 @@
 import { useState, useEffect, useMemo } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { simplifyGeoJSON, filterGeoJSONByBounds } from '../utils/geoUtils';
+import { simplifyGeoJSON, filterGeoJSONByBounds, isPointInBounds } from '../utils/geoUtils';
+import { API_BASE_URL } from '../config/api';
 
 const GEOJSON_CACHE_KEY = 'cached_wards_geojson';
-const CACHE_EXPIRY_HOURS = 24;
-const GEOJSON_URL = 'https://raw.githubusercontent.com/Thabang-777/wards-geojson/main/wards.geojson';
+const CACHE_EXPIRY_HOURS = 2; // Reduced cache time for more frequent updates
+const FALLBACK_GEOJSON_URL = 'https://raw.githubusercontent.com/Thabang-777/wards-geojson/main/wards.geojson';
 
-export const useGeoJSON = (mapBounds = null, simplificationTolerance = 0.001) => {
+export const useGeoJSON = (mapBounds = null, simplificationTolerance = 0.005) => {
   const [geoJsonData, setGeoJsonData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [dataSource, setDataSource] = useState('cache');
 
   // Load and cache GeoJSON data
   useEffect(() => {
@@ -24,27 +26,56 @@ export const useGeoJSON = (mapBounds = null, simplificationTolerance = 0.001) =>
       // Try to load from cache first
       const cachedData = await getCachedGeoJSON();
       if (cachedData) {
+        setDataSource('cache');
         setGeoJsonData(cachedData);
         setLoading(false);
         return;
       }
 
-      // Load from remote URL
-      const response = await fetch(GEOJSON_URL);
-      
-      if (!response.ok) {
-        throw new Error(`Failed to fetch GeoJSON: ${response.status}`);
+      // Try to load from backend API first
+      let rawGeoJSON;
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/wards/boundaries/simplified`);
+        if (response.ok) {
+          const data = await response.json();
+          rawGeoJSON = data.data.geojson;
+          setDataSource('api');
+        } else {
+          throw new Error('API not available');
+        }
+      } catch (apiError) {
+        console.log('API not available, falling back to GitHub:', apiError.message);
+        // Fallback to GitHub URL
+        const response = await fetch(FALLBACK_GEOJSON_URL);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch GeoJSON: ${response.status}`);
+        }
+        rawGeoJSON = await response.json();
+        setDataSource('github');
       }
       
-      const rawGeoJSON = await response.json();
 
-      // Simplify the GeoJSON to improve performance
+      // Aggressive simplification for mobile performance
       const simplifiedGeoJSON = simplifyGeoJSON(rawGeoJSON, simplificationTolerance);
+      
+      // Further reduce data size by removing unnecessary properties
+      const optimizedGeoJSON = {
+        ...simplifiedGeoJSON,
+        features: simplifiedGeoJSON.features.map(feature => ({
+          type: 'Feature',
+          properties: {
+            id: feature.properties?.id || feature.properties?.WARD_ID,
+            name: feature.properties?.name || feature.properties?.WARD_NAME,
+            municipality: feature.properties?.municipality || feature.properties?.MUNICIPALITY
+          },
+          geometry: feature.geometry
+        }))
+      };
 
       // Cache the simplified data
-      await cacheGeoJSON(simplifiedGeoJSON);
+      await cacheGeoJSON(optimizedGeoJSON);
       
-      setGeoJsonData(simplifiedGeoJSON);
+      setGeoJsonData(optimizedGeoJSON);
     } catch (err) {
       console.error('Failed to load GeoJSON:', err);
       setError(err.message);
@@ -86,10 +117,24 @@ export const useGeoJSON = (mapBounds = null, simplificationTolerance = 0.001) =>
     }
   };
 
-  // Filter GeoJSON based on map bounds for performance
+  // Aggressively filter GeoJSON based on map bounds for performance
   const filteredGeoJSON = useMemo(() => {
-    if (!geoJsonData || !mapBounds) return geoJsonData;
-    return filterGeoJSONByBounds(geoJsonData, mapBounds);
+    if (!geoJsonData) return geoJsonData;
+    
+    if (!mapBounds) {
+      // If no bounds, limit to first 50 features for initial load
+      return {
+        ...geoJsonData,
+        features: geoJsonData.features.slice(0, 50)
+      };
+    }
+    
+    // Filter by bounds and limit results
+    const filtered = filterGeoJSONByBounds(geoJsonData, mapBounds);
+    return {
+      ...filtered,
+      features: filtered.features.slice(0, 100) // Max 100 features at once
+    };
   }, [geoJsonData, mapBounds]);
 
   const refreshGeoJSON = () => {
@@ -101,6 +146,8 @@ export const useGeoJSON = (mapBounds = null, simplificationTolerance = 0.001) =>
     geoJsonData: filteredGeoJSON,
     loading,
     error,
-    refreshGeoJSON
+    refreshGeoJSON,
+    dataSource,
+    totalFeatures: geoJsonData?.features?.length || 0
   };
 };

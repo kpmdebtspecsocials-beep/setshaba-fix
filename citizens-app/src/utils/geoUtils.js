@@ -110,12 +110,35 @@ export const renderGeoJSONPolygons = (geoJsonData, options = {}) => {
 /**
  * Simplifies GeoJSON polygons to reduce rendering complexity
  * @param {Object} geojson - The GeoJSON object
- * @param {number} tolerance - Simplification tolerance (higher = more simplified)
+ * @param {number} tolerance - Simplification tolerance (0.001-0.01, higher = more simplified)
  * @returns {Object} Simplified GeoJSON
  */
-export const simplifyGeoJSON = (geojson, tolerance = 0.001) => {
+export const simplifyGeoJSON = (geojson, tolerance = 0.005) => {
   try {
-    return simplify(geojson, tolerance);
+    // Use the simplify library with high tolerance for mobile performance
+    const simplified = simplify(geojson, tolerance, true); // highQuality = true
+    
+    // Additional manual simplification for very complex polygons
+    if (simplified.features) {
+      simplified.features = simplified.features.map(feature => {
+        if (feature.geometry?.type === 'Polygon' && feature.geometry.coordinates[0]) {
+          const coords = feature.geometry.coordinates[0];
+          // If polygon has too many points, reduce further
+          if (coords.length > 100) {
+            const step = Math.ceil(coords.length / 50); // Reduce to max 50 points
+            const reducedCoords = coords.filter((_, index) => index % step === 0);
+            // Ensure polygon is closed
+            if (reducedCoords[reducedCoords.length - 1] !== coords[coords.length - 1]) {
+              reducedCoords.push(coords[coords.length - 1]);
+            }
+            feature.geometry.coordinates[0] = reducedCoords;
+          }
+        }
+        return feature;
+      });
+    }
+    
+    return simplified;
   } catch (error) {
     console.warn('Failed to simplify GeoJSON:', error);
     return geojson;
@@ -148,13 +171,27 @@ export const isPointInBounds = (point, bounds) => {
 export const filterGeoJSONByBounds = (geojson, bounds) => {
   if (!bounds || !geojson?.features) return geojson;
 
-  const filteredFeatures = geojson.features.filter(feature => {
+  // Expand bounds slightly to include features that might be partially visible
+  const expandedBounds = {
+    northEast: {
+      latitude: bounds.northEast.latitude + 0.01,
+      longitude: bounds.northEast.longitude + 0.01
+    },
+    southWest: {
+      latitude: bounds.southWest.latitude - 0.01,
+      longitude: bounds.southWest.longitude - 0.01
+    }
+  };
+  const filteredFeatures = geojson.features.filter((feature, index) => {
+    // Skip every other feature for better performance on mobile
+    if (index % 2 !== 0 && geojson.features.length > 50) return false;
+    
     if (!feature.geometry?.coordinates) return false;
 
     // For polygons, check if any coordinate is within bounds
     const coordinates = feature.geometry.coordinates[0] || [];
     return coordinates.some(coord => 
-      isPointInBounds({ latitude: coord[1], longitude: coord[0] }, bounds)
+      isPointInBounds({ latitude: coord[1], longitude: coord[0] }, expandedBounds)
     );
   });
 
@@ -185,10 +222,10 @@ export const calculateDistance = (point1, point2) => {
 /**
  * Debounce function to limit API calls
  * @param {Function} func - Function to debounce
- * @param {number} wait - Wait time in milliseconds
+ * @param {number} wait - Wait time in milliseconds (default 300)
  * @returns {Function} Debounced function
  */
-export const debounce = (func, wait) => {
+export const debounce = (func, wait = 300) => {
   let timeout;
   return function executedFunction(...args) {
     const later = () => {
@@ -198,4 +235,46 @@ export const debounce = (func, wait) => {
     clearTimeout(timeout);
     timeout = setTimeout(later, wait);
   };
+};
+
+/**
+ * Throttle function to limit frequent calls
+ * @param {Function} func - Function to throttle
+ * @param {number} limit - Time limit in milliseconds
+ * @returns {Function} Throttled function
+ */
+export const throttle = (func, limit = 100) => {
+  let inThrottle;
+  return function executedFunction(...args) {
+    if (!inThrottle) {
+      func.apply(this, args);
+      inThrottle = true;
+      setTimeout(() => inThrottle = false, limit);
+    }
+  };
+};
+
+/**
+ * Check if a feature should be rendered based on zoom level and complexity
+ * @param {Object} feature - GeoJSON feature
+ * @param {number} zoomLevel - Current map zoom level (0-20)
+ * @returns {boolean} Whether to render the feature
+ */
+export const shouldRenderFeature = (feature, zoomLevel = 10) => {
+  if (!feature.geometry?.coordinates) return false;
+  
+  // At low zoom levels, only render larger/simpler features
+  if (zoomLevel < 8) {
+    const coords = feature.geometry.coordinates[0] || [];
+    return coords.length < 50; // Only simple polygons at low zoom
+  }
+  
+  // At medium zoom levels, render most features
+  if (zoomLevel < 12) {
+    const coords = feature.geometry.coordinates[0] || [];
+    return coords.length < 100;
+  }
+  
+  // At high zoom levels, render all features
+  return true;
 };
